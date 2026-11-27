@@ -246,7 +246,7 @@ class UserCreationSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        if attrs.get('password') and attrs.get('password') != attrs.get('password_confirm'):
+        if attrs.get('password') and attrs.get('password_confirm') and attrs.get('password') != attrs.get('password_confirm'):
             raise serializers.ValidationError("Passwords don't match")
         return attrs
 

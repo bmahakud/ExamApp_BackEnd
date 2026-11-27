@@ -414,8 +414,24 @@ def add_student_to_batch(request):
             )
     
     # Generate code and password
-    username = generate_user_code('STUDENT', None, batch_code)
-    password = generate_password('STUDENT', None, batch_code, date_of_birth, name=name, phone_number=phone_number)
+    provided_username = request.data.get("username")
+    if provided_username:
+        username = str(provided_username).strip()
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"detail": f"Username '{username}' already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        username = generate_user_code('STUDENT', None, batch_code)
+
+    provided_password = request.data.get("password")
+    if provided_password and isinstance(provided_password, str):
+        provided_password = provided_password.strip()
+
+    password = provided_password if provided_password else generate_password(
+        'STUDENT', None, batch_code, date_of_birth, name=name, phone_number=phone_number
+    )
     
     # Split name
     name_parts = name.strip().split()

@@ -2148,6 +2148,7 @@ def confirm_section_import(request):
                         subject=subject,
                         question_number=actual_question_number,
                         question_number_in_pattern=question_number_in_pattern,
+                        paper_question_number=q_data.get('paper_question_number') or q_data.get('question_number'),
                         pattern_section_id=section_id,
                         pattern_section_name=section_name,
                         institute=exam.institute,

@@ -84,6 +84,7 @@ def extract_questions_v3_task(self, job_id: str, subjects: list = None):
                 confidence_score=0.5 if q['review'] else 0.95,
                 requires_review=bool(q['review']),
                 import_error='; '.join(q['review']),  # shown as the review reason in ExtractionV3/Review.tsx
+                paper_question_number=q.get('number'),
             )
 
         logger.info(
@@ -286,54 +287,70 @@ def cleanup_old_extraction_jobs():
     time_limit=900,
     soft_time_limit=840,
 )
-def extract_answers_task(self, job_id: str):
+def extract_answers_task(self, job_id: str, tenant_db: str = None):
     """Run OCR + Gemini on an answer-key file and stage the results for review.
 
-    Matches each extracted (question_number, answer) pair to a Question in the job's
-    exam by question_number. Unmatched rows are still saved so the reviewer can see them.
+    Matches each extracted answer to a Question in the job's exam.
+    Unmatched rows are still saved so the reviewer can see them.
     """
-    from questions.models import AnswerExtractionJob, ExtractedAnswer, Question
-    from questions.services.answer_key_extractor import extract_answer_key
+    from accounts.tenant_middleware import activate_tenant_db
+    from questions.models import AnswerExtractionJob, ExtractedAnswer
+    from questions.services.answer_key_extractor import extract_answer_key, match_answers_to_exam
+
+    if tenant_db:
+        activate_tenant_db(tenant_db)
 
     job_uuid = UUID(job_id)
-    job = AnswerExtractionJob.objects.get(id=job_uuid)
+    try:
+        job = AnswerExtractionJob.objects.get(id=job_uuid)
+    except AnswerExtractionJob.DoesNotExist:
+        # Search tenant databases if not found in active db
+        from accounts.models import Institute
+        found = False
+        for inst in Institute.objects.using('default').filter(is_active=True).exclude(db_name='default'):
+            activate_tenant_db(inst.db_name)
+            try:
+                job = AnswerExtractionJob.objects.get(id=job_uuid)
+                found = True
+                break
+            except AnswerExtractionJob.DoesNotExist:
+                continue
+        if not found:
+            activate_tenant_db('default')
+            job = AnswerExtractionJob.objects.get(id=job_uuid)
+
     job.status = 'processing'
     job.progress_percent = 10
     job.save(update_fields=['status', 'progress_percent'])
 
     try:
         entries = extract_answer_key(job.file_path, job.file_type)
-        job.progress_percent = 70
+        job.progress_percent = 60
         job.save(update_fields=['progress_percent'])
 
-        questions_by_number = {
-            q.question_number: q
-            for q in Question.objects.filter(exam=job.exam, is_active=True)
-            if q.question_number is not None
-        }
+        matched_rows = match_answers_to_exam(entries, job.exam)
+        job.progress_percent = 80
+        job.save(update_fields=['progress_percent'])
 
-        seen_numbers = set()
-        for entry in entries:
-            q_no = entry['question_number']
-            if q_no in seen_numbers:
-                # Answer keys occasionally repeat a row (e.g. continuation pages); keep the first.
-                continue
-            seen_numbers.add(q_no)
+        job.extracted_answers.filter(is_applied=False).delete()
 
-            question = questions_by_number.get(q_no)
-            ExtractedAnswer.objects.update_or_create(
+        created_objs = [
+            ExtractedAnswer(
                 job=job,
-                question_number=q_no,
-                defaults={
-                    'extracted_answer': entry['answer'],
-                    'matched_question': question,
-                    'current_answer': question.correct_answer if question else '',
-                    'match_status': 'matched' if question else 'unmatched',
-                },
+                question_number=r['question_number'],
+                subject=r.get('subject') or '',
+                extracted_answer=r['extracted_answer'],
+                matched_question=r.get('matched_question'),
+                current_answer=r.get('current_answer', ''),
+                match_status=r['match_status'],
+                review_flags=r.get('review_flags', []),
             )
+            for r in matched_rows
+        ]
+        ExtractedAnswer.objects.bulk_create(created_objs)
 
         job.mark_completed()
-        return {'success': True, 'count': len(seen_numbers)}
+        return {'success': True, 'count': len(matched_rows)}
 
     except Exception as exc:
         logger.error(f"Answer extraction failed for job {job_id}: {exc}", exc_info=True)

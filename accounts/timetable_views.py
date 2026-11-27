@@ -229,8 +229,21 @@ def create_admin(request):
     
     # Generate code and password - use 'ADMIN' role for timetable system
     center_code = center.name[:4].replace(" ", "").replace("-", "")
-    username = generate_user_code('ADMIN', center_code)
-    password = generate_password('ADMIN', center_code, phone_number=phone_number)
+    provided_username = request.data.get("username")
+    if provided_username:
+        username = str(provided_username).strip()
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"detail": f"Username '{username}' already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        username = generate_user_code('ADMIN', center_code)
+
+    provided_password = request.data.get("password")
+    if provided_password and isinstance(provided_password, str):
+        provided_password = provided_password.strip()
+    password = provided_password if provided_password else generate_password('ADMIN', center_code, phone_number=phone_number)
     
     # Split name
     name_parts = name.strip().split()
@@ -419,8 +432,21 @@ def create_teacher(request):
     
     # Generate code and password
     center_code = center.name[:4].replace(" ", "").replace("-", "")
-    username = generate_user_code('TEACHER', center_code)
-    password = generate_password('TEACHER', center_code, phone_number=phone_number)
+    provided_username = request.data.get("username")
+    if provided_username:
+        username = str(provided_username).strip()
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"detail": f"Username '{username}' already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        username = generate_user_code('TEACHER', center_code)
+
+    provided_password = request.data.get("password")
+    if provided_password and isinstance(provided_password, str):
+        provided_password = provided_password.strip()
+    password = provided_password if provided_password else generate_password('TEACHER', center_code, phone_number=phone_number)
     teacher_code = username  # Use same code
     
     # Split name
@@ -476,7 +502,7 @@ def create_student(request):
     - Super Admin: Can create student in any batch
     - Admin: Can create student in batches from their center
     
-    Auto-generates:
+    Auto-generates (if not provided):
     - username (code): STU-<batch_code>-<4_digits>
     - password: Student@<batch_code><year> or Student@<dob_year>
     
@@ -486,7 +512,9 @@ def create_student(request):
         "name": "Student Name",
         "email": "student@example.com",
         "phone_number": "9876543210",
-        "date_of_birth": "2010-05-15"
+        "date_of_birth": "2010-05-15",
+        "password": "optional_custom_password",
+        "username": "optional_custom_username"
     }
     
     Returns:
@@ -496,7 +524,6 @@ def create_student(request):
         "user_id": "uuid"
     }
     """
-    print("Debuging working")
     can_proceed, role_info, error_response = _check_admin_or_super(request)
     if not can_proceed:
         return error_response
@@ -544,10 +571,25 @@ def create_student(request):
             )
     
     # Generate code and password
-    username = generate_user_code('STUDENT', None, batch_code)
-    password = generate_password('STUDENT', None, batch_code, date_of_birth, name=name, phone_number=phone_number)
+    provided_username = request.data.get("username")
+    if provided_username:
+        username = str(provided_username).strip()
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"detail": f"Username '{username}' already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        username = generate_user_code('STUDENT', None, batch_code)
+
+    provided_password = request.data.get("password")
+    if provided_password and isinstance(provided_password, str):
+        provided_password = provided_password.strip()
+
+    password = provided_password if provided_password else generate_password(
+        'STUDENT', None, batch_code, date_of_birth, name=name, phone_number=phone_number
+    )
     
-    print("Debuging working")
     # Split name
     name_parts = name.strip().split()
     first_name = name_parts[0] if name_parts else name
@@ -578,7 +620,6 @@ def create_student(request):
                 defaults={'status': Enrollment.STATUS_ACTIVE}
             )
             
-            print("Debuging working")
             # Send credential email
             send_credentials_email(user, password)
             
@@ -669,8 +710,21 @@ def create_staff(request):
     
     # Generate code and password
     center_code = center.name[:4].replace(" ", "").replace("-", "")
-    username = generate_user_code('STAFF', center_code)
-    password = generate_password('STAFF', center_code, phone_number=phone_number)
+    provided_username = request.data.get("username")
+    if provided_username:
+        username = str(provided_username).strip()
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {"detail": f"Username '{username}' already exists."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        username = generate_user_code('STAFF', center_code)
+
+    provided_password = request.data.get("password")
+    if provided_password and isinstance(provided_password, str):
+        provided_password = provided_password.strip()
+    password = provided_password if provided_password else generate_password('STAFF', center_code, phone_number=phone_number)
     
     # Split name
     name_parts = name.strip().split()
@@ -932,8 +986,10 @@ def bulk_create_teachers(request):
         
         try:
                 # Generate code and password
-                username = generate_user_code('TEACHER', center_code)
-                password = generate_password('TEACHER', center_code, phone_number=phone_number)
+                provided_username = teacher_data.get('username', '').strip() if teacher_data.get('username') else None
+                username = provided_username if provided_username else generate_user_code('TEACHER', center_code)
+                provided_password = teacher_data.get('password', '').strip() if teacher_data.get('password') else None
+                password = provided_password if provided_password else generate_password('TEACHER', center_code, phone_number=phone_number)
                 teacher_code = username
                 
                 # Split name
@@ -1211,7 +1267,8 @@ def bulk_create_students(request):
         try:
             # Use provided username or auto-generate
             username = provided_username if provided_username else generate_user_code('STUDENT', center_code)
-            password = generate_password('STUDENT', center_code, name=name, phone_number=phone_number)
+            provided_password = student_data.get('password', '').strip() if student_data.get('password') else None
+            password = provided_password if provided_password else generate_password('STUDENT', center_code, name=name, phone_number=phone_number)
             
             # Split name
             name_parts = name.strip().split()
@@ -1484,8 +1541,10 @@ def bulk_create_staff(request):
         
         try:
             # Generate code and password - unique for each staff member
-            username = generate_user_code('STAFF', center_code)
-            password = generate_password('STAFF', center_code, phone_number=phone_number)
+            provided_username = staff_member.get('username', '').strip() if staff_member.get('username') else None
+            username = provided_username if provided_username else generate_user_code('STAFF', center_code)
+            provided_password = staff_member.get('password', '').strip() if staff_member.get('password') else None
+            password = provided_password if provided_password else generate_password('STAFF', center_code, phone_number=phone_number)
             
             # Split name
             name_parts = name.strip().split()

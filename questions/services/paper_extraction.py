@@ -164,7 +164,13 @@ def _file_part(file_path: Optional[str]) -> Optional[Dict]:
         return {'inlineData': {'mimeType': mime, 'data': base64.b64encode(f.read()).decode()}}
 
 
-def call_gemini(system_prompt: str, markdown: str, model: str, file_path: Optional[str] = None) -> Tuple[Dict, Dict]:
+def call_gemini(
+    system_prompt: str,
+    markdown: str,
+    model: str,
+    file_path: Optional[str] = None,
+    schema: Optional[Dict] = None,
+) -> Tuple[Dict, Dict]:
     """One structured-output call. Returns (parsed JSON, usageMetadata). Raises PaperExtractionError."""
     parts = [{'text': 'OCR MARKDOWN:\n' + markdown}]
     file_part = _file_part(file_path)
@@ -175,7 +181,7 @@ def call_gemini(system_prompt: str, markdown: str, model: str, file_path: Option
         'contents': [{'role': 'user', 'parts': parts}],
         'generationConfig': {
             'responseMimeType': 'application/json',
-            'responseJsonSchema': SCHEMA,
+            'responseJsonSchema': SCHEMA if schema is None else schema,
             'thinkingConfig': {'thinkingLevel': settings.EXTRACTION_GEMINI_THINKING_LEVEL},
         },
     }

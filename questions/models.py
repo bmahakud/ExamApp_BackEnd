@@ -77,6 +77,8 @@ class Question(models.Model):
     question_number = models.IntegerField(validators=[MinValueValidator(1)], help_text='Question number in the exam', null=True, blank=True)
     # Position within the pattern (subject-wise numbering)
     question_number_in_pattern = models.IntegerField(null=True, blank=True, help_text='Question number within the pattern/subject grouping')
+    # Original question number printed in the paper
+    paper_question_number = models.IntegerField(null=True, blank=True, help_text='Original question number as printed on the paper')
     
     # References
     question_bank = models.ForeignKey(QuestionBank, on_delete=models.CASCADE, related_name='questions', null=True, blank=True)
@@ -776,6 +778,11 @@ class ExtractedQuestion(models.Model):
         related_name='extraction_source',
         help_text='Reference to the imported Question record'
     )
+    paper_question_number = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text='Original question number as printed on the paper'
+    )
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1138,6 +1145,7 @@ class ExtractedAnswer(models.Model):
         related_name='extracted_answers',
     )
     question_number = models.IntegerField()
+    subject = models.CharField(max_length=100, blank=True, default='')
     extracted_answer = models.TextField()
 
     matched_question = models.ForeignKey(
@@ -1158,6 +1166,11 @@ class ExtractedAnswer(models.Model):
         db_index=True,
     )
 
+    review_flags = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='List of review warnings (e.g. duplicate question number, option mismatch)',
+    )
     skip = models.BooleanField(default=False)
     is_applied = models.BooleanField(default=False, db_index=True)
     apply_error = models.TextField(blank=True)
@@ -1166,8 +1179,10 @@ class ExtractedAnswer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['question_number']
-        unique_together = [('job', 'question_number')]
+        ordering = ['question_number', 'id']
+        indexes = [
+            models.Index(fields=['job', 'question_number']),
+        ]
 
     def __str__(self):
         return f"Q{self.question_number} -> {self.extracted_answer[:30]} ({self.match_status})"
