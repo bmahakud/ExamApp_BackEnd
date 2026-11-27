@@ -14,6 +14,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from accounts.utils import get_current_db
 from exams.models import Exam
 from questions.models import AnswerExtractionJob, ExtractedAnswer, Question
 from questions.tasks import extract_answers_task
@@ -31,10 +32,12 @@ def _serialize_row(row: ExtractedAnswer) -> dict:
     return {
         'id': row.id,
         'question_number': row.question_number,
+        'subject': row.subject,
         'extracted_answer': row.extracted_answer,
         'current_answer': row.current_answer,
         'match_status': row.match_status,
         'matched_question_id': row.matched_question_id,
+        'review_flags': row.review_flags or [],
         'skip': row.skip,
         'is_applied': row.is_applied,
         'apply_error': row.apply_error,
@@ -85,7 +88,11 @@ def upload_answer_key(request):
         status='pending',
     )
 
-    extract_answers_task.delay(str(job.id))
+    tenant_db = get_current_db()
+    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+        extract_answers_task(str(job.id), tenant_db=tenant_db)
+    else:
+        extract_answers_task.delay(str(job.id), tenant_db=tenant_db)
 
     return Response(
         {'job_id': str(job.id), 'status': job.status, 'message': 'Answer-key extraction started'},
@@ -125,6 +132,7 @@ def get_answer_key_preview(request, job_id):
 
     rows = list(job.extracted_answers.all())
     matched_count = sum(1 for r in rows if r.match_status == 'matched')
+    flagged_count = sum(1 for r in rows if r.review_flags)
 
     return Response({
         'job_id': str(job.id),
@@ -133,6 +141,7 @@ def get_answer_key_preview(request, job_id):
             'total': len(rows),
             'matched': matched_count,
             'unmatched': len(rows) - matched_count,
+            'flagged': flagged_count,
         },
         'rows': [_serialize_row(r) for r in rows],
     })
