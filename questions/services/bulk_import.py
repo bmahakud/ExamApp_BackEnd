@@ -19,13 +19,26 @@ class BulkImportError(Exception):
     pass
 
 
+class PatternRangeExceededError(Exception):
+    """Raised when importing questions would exceed the exam pattern's total_questions."""
+    def __init__(self, pattern_limit: int, existing_count: int, incoming_count: int):
+        self.pattern_limit = pattern_limit
+        self.existing_count = existing_count
+        self.incoming_count = incoming_count
+        super().__init__(
+            f"Adding {incoming_count} questions exceeds the pattern limit of {pattern_limit} "
+            f"({existing_count} already exist)."
+        )
+
+
 class BulkImportService:
     """Import validated questions into database"""
     
     def import_questions(
         self, 
         extraction_job_id: UUID, 
-        question_mappings: List[Dict]
+        question_mappings: List[Dict],
+        replace_existing: bool = False,
     ) -> Dict:
         """
         Import extracted questions into exam
@@ -51,7 +64,24 @@ class BulkImportService:
         """
         try:
             # Get extraction job
-            job = ExtractionJob.objects.get(id=extraction_job_id)
+            job = ExtractionJob.objects.select_related('exam', 'pattern').get(id=extraction_job_id)
+
+            pattern_limit = job.pattern.total_questions if job.pattern else None
+            existing_count = Question.objects.filter(exam=job.exam, is_active=True).count()
+            incoming_count = len(question_mappings)
+
+            if pattern_limit and (existing_count + incoming_count > pattern_limit):
+                if not replace_existing:
+                    raise PatternRangeExceededError(pattern_limit, existing_count, incoming_count)
+                from questions.models import ExtractedAnswer
+                with transaction.atomic():
+                    ExtractedQuestion.objects.filter(
+                        job__exam=job.exam, imported_question__isnull=False
+                    ).update(is_imported=False, imported_question=None)
+                    ExtractedAnswer.objects.filter(
+                        job__exam=job.exam, matched_question__isnull=False
+                    ).update(is_applied=False, matched_question=None)
+                    Question.objects.filter(exam=job.exam).delete()
             
             # Get extracted questions
             extracted_question_ids = [m['extracted_question_id'] for m in question_mappings]
@@ -219,6 +249,8 @@ class BulkImportService:
                 'exam_id': job.exam.id,
             }
             
+        except PatternRangeExceededError:
+            raise
         except ExtractionJob.DoesNotExist:
             raise BulkImportError(f"Extraction job {extraction_job_id} not found")
         except Exception as e:

@@ -2,6 +2,8 @@
 API views for question extraction
 """
 import os
+import re
+import time
 import logging
 from typing import Dict, List
 from uuid import UUID
@@ -357,21 +359,33 @@ class ExtractionJobViewSet(viewsets.ModelViewSet):
                 subjects_list = None
                 
             logger.info(f"V3 Upload: Parsed subjects for extraction: {subjects_list} (type: {type(subjects_list)})")
-            
-            # FORCE SYNC EXECUTION for V3 to ensure it runs in user's environment
-            # This bypasses Celery queue which seems to be stuck or not running
-            logger.info(f"Force running V3 extraction synchronously for job {job.id} with subjects: {subjects_list}")
-            try:
-                 extract_questions_v3_task(str(job.id), subjects=subjects_list)
-            except Exception as e:
-                 logger.error(f"Sync execution failed: {e}")
-                 # Fallback to delay if sync fails (unlikely)
-                 extract_questions_v3_task.delay(str(job.id), subjects=subjects_list)
-                
+
+            # Run extraction in a background thread so the HTTP response returns immediately.
+            # The frontend polls /api/questions/extraction-status/<job_id>/ for live progress.
+            import threading
+            job_id_str = str(job.id)
+
+            def _run_extraction():
+                try:
+                    extract_questions_v3_task(job_id_str, subjects=subjects_list)
+                except Exception as exc:
+                    logger.error(f"Background extraction failed for job {job_id_str}: {exc}", exc_info=True)
+                    try:
+                        from questions.models import ExtractionJob as _EJ
+                        _j = _EJ.objects.get(id=job_id_str)
+                        if _j.status != 'failed':
+                            _j.mark_failed(str(exc))
+                    except Exception:
+                        pass
+
+            t = threading.Thread(target=_run_extraction, daemon=True, name=f"extraction-{job_id_str[:8]}")
+            t.start()
+            logger.info(f"V3 Upload: Background thread {t.name} started for job {job_id_str}")
+
             return Response({
-                'job_id': str(job.id),
-                'status': 'processing', # It should be processing or completed now
-                'message': 'Extraction V3 started successfully',
+                'job_id': job_id_str,
+                'status': 'queued',
+                'message': 'Extraction V3 started. Poll /api/questions/extraction-status/<job_id>/ for progress.',
                 'file_url': f"{settings.MEDIA_URL}{upload_subpath}/{unique_name}"
             }, status=status.HTTP_201_CREATED)
             
@@ -532,14 +546,24 @@ def bulk_import_extracted_questions(request):
     """
     Finalize and import questions extracted by the Agentic V3 pipeline.
     """
-    from questions.services.bulk_import import BulkImportService
+    from questions.services.bulk_import import BulkImportService, PatternRangeExceededError
     job_id = request.data.get('job_id')
     mappings = request.data.get('mappings', [])
-    
+    replace_existing = bool(request.data.get('replace_existing', False))
+
     try:
         service = BulkImportService()
-        result = service.import_questions(job_id, mappings)
+        result = service.import_questions(job_id, mappings, replace_existing=replace_existing)
         return Response(result, status=status.HTTP_200_OK)
+    except PatternRangeExceededError as e:
+        return Response({
+            'code': 'pattern_range_exceeded',
+            'requires_confirmation': True,
+            'message': str(e),
+            'pattern_limit': e.pattern_limit,
+            'existing_count': e.existing_count,
+            'incoming_count': e.incoming_count,
+        }, status=status.HTTP_409_CONFLICT)
     except Exception as e:
         logger.error(f"Bulk import failed: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -93,6 +93,7 @@ urlpatterns = [
     path('answer-keys/<uuid:job_id>/preview/', answer_extraction_views.get_answer_key_preview, name='answer-key-preview'),
     path('answer-keys/<uuid:job_id>/apply/', answer_extraction_views.apply_answer_key, name='answer-key-apply'),
     path('extracted-answers/<int:pk>/', answer_extraction_views.update_extracted_answer, name='extracted-answer-update'),
+    path('exams/<int:exam_id>/bulk-cleanup/', answer_extraction_views.exam_bulk_cleanup, name='exam-bulk-cleanup'),
 
     # Include extraction router URLs
     path('', include(extraction_router.urls)),

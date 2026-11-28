@@ -61,6 +61,14 @@ class AnswerKeyExtractionError(PaperExtractionError):
     """Raised when answer-key extraction fails."""
 
 
+def _plain_answer(ans: str) -> str:
+    """Convert LaTeX-wrapped short answers like '$80 \\mu \\mathrm{C}$' to plain '80 μC'."""
+    t = ans.strip().strip('$').strip()
+    t = re.sub(r'\\(?:mathrm|text|mathbf)\{([^}]*)\}', r'\1', t)
+    t = re.sub(r'\\mu\s*', 'μ', t).replace(r'\times', '×').replace(r'\Omega', 'Ω')
+    return re.sub(r'\s+', ' ', t).strip()
+
+
 def normalize_answer(answer: str, is_mcq: bool = False) -> str:
     """Normalize extracted answer string.
 
@@ -77,8 +85,7 @@ def normalize_answer(answer: str, is_mcq: bool = False) -> str:
     if letters and (is_mcq or (cleaned_test and all(c.upper() in 'ABCDEFGH' for c in cleaned_test))):
         return ', '.join(l.upper() for l in letters)
 
-    return raw
-
+    return _plain_answer(raw)
 
 def extract_answer_key(file_path: str, content_type: str = '') -> List[Dict]:
     """Run Mathpix OCR + structured Gemini call on an answer-key document.
@@ -114,7 +121,6 @@ def extract_answer_key(file_path: str, content_type: str = '') -> List[Dict]:
             q_no = int(item.get('question_number'))
         except (TypeError, ValueError):
             continue
-
         subj = item.get('subject')
         if subj is not None:
             subj = str(subj).strip() or None

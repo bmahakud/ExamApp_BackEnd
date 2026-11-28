@@ -347,7 +347,8 @@ def extract_answers_task(self, job_id: str, tenant_db: str = None):
             )
             for r in matched_rows
         ]
-        ExtractedAnswer.objects.bulk_create(created_objs)
+        if created_objs:
+            ExtractedAnswer.objects.bulk_create(created_objs)
 
         job.mark_completed()
         return {'success': True, 'count': len(matched_rows)}
@@ -366,7 +367,7 @@ def update_extraction_metrics():
     This should be run hourly via Celery Beat
     """
     try:
-        from django.db.models import Count, Avg, Sum
+        from django.db.models import Count, Avg, Sum, Q
         from datetime import timedelta
         from django.utils import timezone
         
@@ -377,8 +378,8 @@ def update_extraction_metrics():
             created_at__gte=since
         ).aggregate(
             total_jobs=Count('id'),
-            completed_jobs=Count('id', filter=models.Q(status='completed')),
-            failed_jobs=Count('id', filter=models.Q(status='failed')),
+            completed_jobs=Count('id', filter=Q(status='completed')),
+            failed_jobs=Count('id', filter=Q(status='failed')),
             avg_processing_time=Avg('processing_time_seconds'),
             total_questions_extracted=Sum('questions_extracted'),
             total_tokens_used=Sum('tokens_used'),
