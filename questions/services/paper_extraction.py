@@ -77,15 +77,20 @@ Rules:
 - question_number: the printed number. Numbers can appear before, beside or after their stem or options
   because of layout; group each stem and its options with the number they belong to.
 - question_text: the stem only - no question number, no options, no marks annotation such as "[2 marks]".
-  Write every mathematical/chemical expression in LaTeX inside $...$.
+  NEVER repeat the answer choices/options (whether numbered 1, 2, 3, 4 or labeled A, B, C, D) inside question_text.
+  Write every mathematical/chemical expression in LaTeX inside $...$ (for example $x^2$, $10^{{-6}}\\text{{ C}}$, $\\frac{{a}}{{b}}$).
+  Never output raw LaTeX commands or power expressions like ^{{...}} outside $...$.
 - Image links ![](url): every link that belongs to a question must appear, unchanged, in that question's
   question_text (a diagram in the stem) or in an option (an option that is a picture).
+  If the choices (A)-(D) are each a graph/diagram image ![](url), put those 4 image links in options in order
+  and do NOT put them in question_text.
 - options: the choices in order (A, B, C, D), text only without the label. If the selectable choices are
-  bare labels that refer to content printed elsewhere (for example "(A) 1." referring to "(1) <content>"),
-  output the referenced content. If the same set of choices is printed twice, output it once.
+  bare labels that refer to content printed elsewhere (for example "(A) 1." referring to "(1) <content>", or
+  "(A) A." referring to "(A) ![](url)"), output the referenced content/image URL. If the same set of choices is
+  printed twice, output it once. Use \\epsilon_{{0}} (never \\in_{{0}}) for permittivity.
 - question_type: single_mcq (exactly one correct choice), multiple_mcq (the paper says one or more may be
-  correct), numerical (numeric answer, no choices), fill_blank, true_false, subjective (written or
-  constructed answer).
+  correct), numerical (numeric answer, no choices - e.g. "Find the value of n", "in μC", "in N/C", "ratio b/a"),
+  fill_blank, true_false, subjective (written or constructed proof/essay answer).
 - sub_parts: labelled parts (a), (b), (i)... of a non-MCQ question, in order, without labels; never put
   them in options.
 - answer_from_source: only an answer printed in the paper (answer key or solution) - never work it out.
@@ -235,21 +240,83 @@ def _bare_image_urls(text: str) -> str:
     return re.sub(r'[ \t]*!\[[^\]]*\]\((\S+?)\)[ \t]*', r'\n\1\n', text).strip()
 
 
+_UNICODE_MATH_MAP = {
+    'μ': r'\mu ', 'α': r'\alpha ', 'β': r'\beta ', 'γ': r'\gamma ', 'δ': r'\delta ',
+    'θ': r'\theta ', 'λ': r'\lambda ', 'ε': r'\varepsilon ', 'π': r'\pi ',
+    'σ': r'\sigma ', 'τ': r'\tau ', 'φ': r'\phi ', 'ω': r'\omega ', 'Ω': r'\Omega ',
+    'Δ': r'\Delta ', '×': r'\times ', '÷': r'\div ', '±': r'\pm ', '≤': r'\leq ',
+    '≥': r'\geq ', '≠': r'\neq ', '≈': r'\approx ', '→': r'\rightarrow ', '°': r'^{\circ}',
+}
+_UNIT_RE = re.compile(
+    r'(?:^|\s)[+-]?\d+(?:\.\d+)?\s*[μmnkKMGT]?(?:C|F|Ω|V|A|N|J|W|Pa|Hz|eV|mol|g|kg|m|s|cm|mm|km)'
+    r'(?:/(?:m|s|kg|C|N|mol|L|m²|s²))?(?:$|\s)'
+)
+
+
+def _normalize_math_delimiters(text: str) -> str:
+    """Convert \\(...\\)/\\[...\\] to $...$/$$...$$ and fix Mathpix's \\in_0 permittivity typo."""
+    t = re.sub(r'\\\(([\s\S]*?)\\\)', lambda m: f'${m.group(1).strip()}$', text)
+    t = re.sub(r'\\\[([\s\S]*?)\\\]', lambda m: f'$${m.group(1).strip()}$$', t)
+    # Mathpix sometimes OCRs \epsilon_0 as \in_0; set membership \in never takes a numeric subscript.
+    t = re.sub(r'\\in(?=\s*(?:_\{?\s*0\b|_0\b))', r'\\epsilon', t)
+    return t
+
+
+def _to_latex_chars(text: str) -> str:
+    for ch, rep in _UNICODE_MATH_MAP.items():
+        if ch in text:
+            text = text.replace(ch, rep)
+    return re.sub(r' {2,}', ' ', text).strip()
+
+
 def fix_escapes(text) -> str:
     t = str(text or '')
     t = t.replace('\x0c', '\\f').replace('\x08', '\\b').replace('\r', '\\r')
     t = re.sub(r'\t(?=[A-Za-z])', r'\\t', t)
     # A newline is only ambiguous inside math, where "\n" + "eq" etc. was meant to be \neq.
-    return re.sub(r'\$\$[\s\S]*?\$\$|\$[^$]+?\$',
-                  lambda m: re.sub(r'\n(?=' + _LF_COMMANDS + r'(?![A-Za-z]))', r'\\n', m.group(0)), t)
+    t = re.sub(r'\$\$[\s\S]*?\$\$|\$[^$]+?\$',
+               lambda m: re.sub(r'\n(?=' + _LF_COMMANDS + r'(?![A-Za-z]))', r'\\n', m.group(0)), t)
+    return _normalize_math_delimiters(t)
 
 
 def _wrap_math(text: str) -> str:
     """'\\frac{1}{2}' -> '$\\frac{1}{2}$' when the model left an all-math field without delimiters."""
     t = text.strip()
-    if t and '$' not in t and re.search(r'\\[A-Za-z]+|\^|_\{', t):
+    if not t or '$' in t or 'http://' in t or 'https://' in t:
+        return t
+    # LaTeX command or superscript/subscript
+    if re.search(r'\\[A-Za-z]+|\^|_\{|\^[0-9]', t):
         return f'${t}$'
+    # Math equation or assignment like 'T=m g+E q' or 'x = 2'
+    if re.search(r'^[A-Za-z]\s*=\s*.*[+\-*/]', t):
+        return f'${t}$'
+    # Plain-text Physics/Chemistry unit/symbol option like '2 μC', '10 Ω', 'α + β'
+    if any(ch in t for ch in _UNICODE_MATH_MAP) and len(t) <= 40:
+        return f'${_to_latex_chars(t)}$'
     return t
+
+
+def _wrap_stem_inline_math(stem: str) -> str:
+    """Wrap isolated mathematical/chemical expressions outside $...$ in $...$."""
+    if not stem:
+        return ''
+    # Merge '4 × $10^{23}$' -> '$4 \times 10^{23}$'
+    stem = re.sub(r'(\d+(?:\.\d+)?)\s*[×x]\s*\$([^$\n]+)\$', r'$\1 \\times \2$', stem)
+    # Split by existing $...$ blocks so we only inspect non-math text
+    parts = re.split(r'(\$\$[\s\S]*?\$\$|\$[^$\n]+?\$)', stem)
+    for i in range(0, len(parts), 2):
+        # Skip URLs while wrapping inline math tokens
+        seg = parts[i]
+        tokens = re.split(r'(https?://\S+)', seg)
+        for j in range(0, len(tokens), 2):
+            tok = tokens[j]
+            # Wrap braced powers/subscripts like '-(2/5)^{-3/2} q' or 'H_{2}O'
+            tok = re.sub(r'([+-]?(?:\([^)]+\)|[A-Za-z0-9])+(?:\^|_)\{[^}]+\}(?:\s*[A-Za-z]+)?)', r'$\1$', tok)
+            # Wrap simple unbraced powers/subscripts like 'x^2', 'H_2O' (avoid snake_case identifiers)
+            tok = re.sub(r'(?<![A-Za-z0-9_])([A-Za-z0-9]+\^[0-9]+|[A-Z][a-z]?_[0-9]+(?:\^\{?[0-9+-]+\}?)?)', r'$\1$', tok)
+            tokens[j] = tok
+        parts[i] = ''.join(tokens)
+    return ''.join(parts)
 
 
 def _plain(text: str) -> str:
@@ -268,7 +335,7 @@ def _strip_repeated_options(stem: str, options: List[str]) -> str:
     """Drop an options list the model repeated at the end of the stem."""
     if len(options) < 2:
         return stem
-    m = re.search(r'\s*(\(\s*(?:1|a|A)\s*\)|(?<![A-Za-z])[Aa][.)])\s*\S[\s\S]*$', stem)
+    m = re.search(r'\s*(\(\s*(?:1|a|A)\s*\)|(?<![A-Za-z0-9])[1Aa][.)])\s*\S[\s\S]*$', stem)
     if m and _plain(options[0]) in _plain(m.group(0)) and _plain(options[-1]) in _plain(m.group(0)):
         return stem[:m.start()].rstrip()
     return stem
@@ -289,11 +356,33 @@ def prints_answers(markdown: str) -> bool:
     return bool(_ANSWERS_PRINTED.search(markdown or ''))
 
 
+def _extract_image_options_from_stem(stem: str, options: List[str]) -> Tuple[str, List[str]]:
+    """If options are bare labels (A, B, C, D) and stem ends with labeled option images, move them into options."""
+    if len(options) < 2:
+        return stem, options
+    letters = [re.sub(r'[()\[\].\s]', '', o).upper() for o in options]
+    if letters != [chr(65 + i) for i in range(len(letters))]:
+        return stem, options
+    pattern = re.compile(
+        r'\s*(?:\(\s*A\s*\)|(?<![A-Za-z0-9])A[.)])\s*(https?://\S+)\s*'
+        + ''.join(rf'(?:\(\s*{chr(65 + i)}\s*\)|(?<![A-Za-z0-9]){chr(65 + i)}[.)])\s*(https?://\S+)\s*' for i in range(1, len(letters)))
+        + r'$',
+        re.I,
+    )
+    m = pattern.search(stem)
+    if not m:
+        return stem, options
+    return stem[:m.start()].rstrip(), [m.group(i + 1) for i in range(len(letters))]
+
+
 def clean_question(raw: Dict, subjects: List[str], answers_printed: bool, answer_key: Dict) -> Dict:
     number = raw.get('question_number')
     options = [_bare_image_urls(_wrap_math(fix_escapes(o))) for o in raw.get('options') or []]
-    stem = _strip_repeated_options(_bare_image_urls(fix_escapes(raw.get('question_text'))), options)
-    parts = [_bare_image_urls(_wrap_math(fix_escapes(p))) for p in raw.get('sub_parts') or []]
+    stem = _bare_image_urls(fix_escapes(raw.get('question_text')))
+    stem, options = _extract_image_options_from_stem(stem, options)
+    stem = _wrap_stem_inline_math(_strip_repeated_options(stem, options))
+    parts = [re.sub(r'^(?:\([a-zA-Z0-9]+\)|[a-zA-Z0-9]+[.)])\s+', '', _bare_image_urls(_wrap_math(fix_escapes(p))))
+             for p in raw.get('sub_parts') or []]
     if parts:
         stem = '\n'.join([stem] + [f'({chr(97 + i)}) {p}' for i, p in enumerate(parts)])
     qtype = raw.get('question_type') if raw.get('question_type') in QUESTION_TYPES else 'subjective'

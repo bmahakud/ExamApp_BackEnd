@@ -16,7 +16,7 @@ from rest_framework.response import Response
 
 from accounts.utils import get_current_db
 from exams.models import Exam
-from questions.models import AnswerExtractionJob, ExtractedAnswer, Question
+from questions.models import AnswerExtractionJob, ExtractedAnswer, ExtractedQuestion, Question
 from questions.tasks import extract_answers_task
 
 logger = logging.getLogger('extraction')
@@ -89,13 +89,26 @@ def upload_answer_key(request):
     )
 
     tenant_db = get_current_db()
-    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
-        extract_answers_task(str(job.id), tenant_db=tenant_db)
-    else:
-        extract_answers_task.delay(str(job.id), tenant_db=tenant_db)
+    import threading
+    job_id_str = str(job.id)
+
+    def _run_answer_extraction():
+        try:
+            extract_answers_task(job_id_str, tenant_db=tenant_db)
+        except Exception as exc:
+            logger.error(f"Background answer-key extraction failed for job {job_id_str}: {exc}", exc_info=True)
+            try:
+                _j = AnswerExtractionJob.objects.get(id=job_id_str)
+                if _j.status != 'failed':
+                    _j.mark_failed(str(exc))
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run_answer_extraction, daemon=True, name=f"answer-key-{job_id_str[:8]}")
+    t.start()
 
     return Response(
-        {'job_id': str(job.id), 'status': job.status, 'message': 'Answer-key extraction started'},
+        {'job_id': job_id_str, 'status': job.status, 'message': 'Answer-key extraction started'},
         status=status.HTTP_201_CREATED,
     )
 
@@ -234,4 +247,74 @@ def apply_answer_key(request, job_id):
         'skipped': skipped,
         'unmatched': unmatched,
         'errors': errors,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([JSONParser])
+def exam_bulk_cleanup(request, exam_id):
+    """Delete questions or clear answers for a specific exam.
+
+    POST /api/questions/exams/<int:exam_id>/bulk-cleanup/
+    """
+    exam = get_object_or_404(Exam, id=exam_id)
+    user_role = (getattr(request.user, 'role', '') or '').lower()
+    if not _user_owns_exam(request.user, exam) or user_role == 'student':
+        return Response({'error': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+    scope = request.data.get('scope')
+    if scope not in ('all', 'specific'):
+        return Response({'error': "scope must be 'all' or 'specific'"}, status=status.HTTP_400_BAD_REQUEST)
+
+    delete_questions = bool(request.data.get('delete_questions', False))
+    delete_answers = bool(request.data.get('delete_answers', False))
+    if not delete_questions and not delete_answers:
+        return Response(
+            {'error': 'At least one of delete_questions or delete_answers must be true'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    question_ids = request.data.get('question_ids')
+    if scope == 'specific':
+        if (not isinstance(question_ids, list) or not question_ids or
+                not all(isinstance(q, int) and not isinstance(q, bool) for q in question_ids)):
+            return Response(
+                {'error': 'question_ids must be a non-empty list of integers when scope is specific'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    with transaction.atomic():
+        target_qs = Question.objects.filter(exam=exam)
+        if scope == 'specific':
+            target_qs = target_qs.filter(id__in=question_ids)
+
+        deleted_questions = 0
+        cleared_answers = 0
+
+        if delete_questions:
+            target_ids = list(target_qs.values_list('id', flat=True))
+            if target_ids:
+                ExtractedQuestion.objects.filter(
+                    job__exam=exam, imported_question_id__in=target_ids
+                ).update(is_imported=False, imported_question=None)
+                ExtractedAnswer.objects.filter(
+                    job__exam=exam, matched_question_id__in=target_ids
+                ).update(is_applied=False, matched_question=None)
+                deleted_questions = len(target_ids)
+                Question.objects.filter(exam=exam, id__in=target_ids).delete()
+        elif delete_answers:
+            target_ids = list(target_qs.values_list('id', flat=True))
+            if target_ids:
+                cleared_answers = Question.objects.filter(exam=exam, id__in=target_ids).update(correct_answer='')
+                ExtractedAnswer.objects.filter(
+                    job__exam=exam, matched_question_id__in=target_ids
+                ).update(is_applied=False)
+            if scope == 'all':
+                ExtractedAnswer.objects.filter(job__exam=exam, is_applied=True).update(is_applied=False)
+
+    return Response({
+        'exam_id': exam.id,
+        'deleted_questions': deleted_questions,
+        'cleared_answers': cleared_answers,
     })

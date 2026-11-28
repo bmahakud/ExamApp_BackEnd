@@ -470,6 +470,8 @@ class UserListView(generics.ListCreateAPIView):
             eff_institute_id = user.institute_id
         
         center_id = self.request.query_params.get('center_id')
+        role_param = self.request.query_params.get('role')
+        search_query = self.request.query_params.get('search')
         
         user_role = (user.role or '').lower()
         if user_role in ['super_admin', 'superadmin'] or is_platform_user(user):
@@ -480,6 +482,27 @@ class UserListView(generics.ListCreateAPIView):
                 queryset = queryset.filter(institute_id=eff_institute_id)
             if center_id:
                 queryset = queryset.filter(center_id=center_id)
+            if role_param:
+                role_val = role_param.lower()
+                if role_val in ['super_admin', 'superadmin']:
+                    queryset = queryset.filter(Q(role__in=['super_admin', 'superadmin']))
+                elif role_val in ['admin', 'center_admin', 'admins']:
+                    queryset = queryset.filter(Q(role__in=['admin', 'center_admin']))
+                elif role_val in ['teacher', 'teachers']:
+                    queryset = queryset.filter(Q(role__in=['teacher', 'TEACHER']))
+                elif role_val in ['student', 'students']:
+                    queryset = queryset.filter(Q(role__in=['student', 'STUDENT']))
+                elif role_val in ['staff']:
+                    queryset = queryset.filter(Q(role__in=['staff', 'STAFF']))
+                else:
+                    queryset = queryset.filter(role__iexact=role_val)
+            if search_query:
+                queryset = queryset.filter(
+                    Q(first_name__icontains=search_query) |
+                    Q(last_name__icontains=search_query) |
+                    Q(email__icontains=search_query) |
+                    Q(username__icontains=search_query)
+                )
             return queryset
         
         # Only Institute Admins (and Exam Admins) see all institute users
