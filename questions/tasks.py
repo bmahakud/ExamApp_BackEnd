@@ -23,7 +23,7 @@ logger = logging.getLogger('extraction')
     max_retries=3,
     default_retry_delay=60,
 )
-def extract_questions_v3_task(self, job_id: str, subjects: list = None):
+def extract_questions_v3_task(self, job_id: str, subjects: list = None, tenant_db: str = None):
     """
     Extract every question in the job's file into ExtractedQuestion rows for review.
 
@@ -32,17 +32,29 @@ def extract_questions_v3_task(self, job_id: str, subjects: list = None):
     of the pattern's subjects; `subjects` (from the UI) only filters which ones are kept.
     """
     import time
+    from accounts.tenant_middleware import activate_tenant_db
+    from accounts.utils import clear_current_db, get_current_db, set_current_db
     from questions.models import ExtractionJob, ExtractedQuestion
     from questions.services.paper_extraction import PaperExtractionError, extract_questions, map_subject
 
-    job = ExtractionJob.objects.get(id=UUID(job_id))
-    job.status = 'processing'
-    job.progress_percent = 10
-    job.error_message = ''
-    job.save(update_fields=['status', 'progress_percent', 'error_message'])
+    prev_db = get_current_db() if tenant_db else None
+    job = None
     started = time.time()
 
     try:
+        if tenant_db:
+            activate_tenant_db(tenant_db)
+
+        claimed = ExtractionJob.objects.filter(
+            id=UUID(job_id)
+        ).exclude(status__in=['processing', 'completed']).update(
+            status='processing', progress_percent=10, error_message=''
+        )
+        job = ExtractionJob.objects.get(id=UUID(job_id))
+        if not claimed or (isinstance(claimed, int) and claimed == 0):
+            logger.info(f"Skipping duplicate V3 extraction for job {job_id} (status={job.status})")
+            return {'skipped': True, 'status': job.status}
+
         pattern_subjects = []
         if job.pattern:
             pattern_subjects = list(dict.fromkeys(job.pattern.sections.values_list('subject', flat=True)))
@@ -68,6 +80,12 @@ def extract_questions_v3_task(self, job_id: str, subjects: list = None):
             raise PaperExtractionError(
                 f'No questions for {", ".join(wanted) or "this pattern"} were found in the document '
                 f'({len(result.questions)} questions found in other subjects).')
+
+        job.progress_percent = 75
+        job.save(update_fields=['progress_percent'])
+
+        # Clear any un-imported rows from a prior partial/failed attempt before inserting
+        ExtractedQuestion.objects.filter(job=job, is_imported=False).delete()
 
         for q in kept:
             ExtractedQuestion.objects.create(
@@ -102,10 +120,17 @@ def extract_questions_v3_task(self, job_id: str, subjects: list = None):
         return {'success': True, 'count': len(kept), 'warnings': result.warnings}
 
     except Exception as e:
-        logger.error(f"V3 extraction job {job.id} failed: {e}", exc_info=not isinstance(e, PaperExtractionError))
-        job.processing_time_seconds = time.time() - started
-        job.mark_failed(str(e))
+        logger.error(f"V3 extraction job {job_id} failed: {e}", exc_info=not isinstance(e, PaperExtractionError))
+        if job is not None:
+            job.processing_time_seconds = time.time() - started
+            job.mark_failed(str(e))
         raise
+    finally:
+        if tenant_db:
+            if prev_db:
+                set_current_db(prev_db)
+            else:
+                clear_current_db()
 
 
 @shared_task(
