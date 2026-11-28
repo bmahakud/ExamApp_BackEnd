@@ -194,17 +194,23 @@ class ExtractionJobViewSet(viewsets.ModelViewSet):
                 logger.info(f"Linked ExtractionJob {job.id} to PreAnalysisJob {pre_analysis_job.id}")
             
             # Trigger extraction task
+            from django.db import transaction as _tx
+            tenant_db_v2 = job._state.db or 'default'
             try:
                 if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
                     # Run synchronously for testing
                     if use_v3:
-                        extract_questions_v3_task(str(job.id))
+                        extract_questions_v3_task(str(job.id), tenant_db=tenant_db_v2)
                     else:
                         extract_questions_task(str(job.id), use_v2=True)
                 else:
-                    # Run async with Celery
+                    # Run async with Celery after commit
                     if use_v3:
-                        extract_questions_v3_task.delay(str(job.id))
+                        _job_id_v2 = str(job.id)
+                        _tx.on_commit(
+                            lambda: extract_questions_v3_task.delay(_job_id_v2, tenant_db=tenant_db_v2),
+                            using=tenant_db_v2,
+                        )
                     else:
                         extract_questions_task.delay(str(job.id), use_v2=True)
             except Exception as task_error:
@@ -360,27 +366,48 @@ class ExtractionJobViewSet(viewsets.ModelViewSet):
                 
             logger.info(f"V3 Upload: Parsed subjects for extraction: {subjects_list} (type: {type(subjects_list)})")
 
-            # Run extraction in a background thread so the HTTP response returns immediately.
+            # Run extraction in a background thread after the job transaction commits.
             # The frontend polls /api/questions/extraction-status/<job_id>/ for live progress.
             import threading
+            from django.db import connections, transaction
+            from accounts.tenant_middleware import activate_tenant_db
+            from accounts.utils import clear_current_db, get_current_db
+
+            authorized_db = get_current_db() or 'default'
+            tenant_db = job._state.db or authorized_db
+            if tenant_db != authorized_db:
+                return Response({'error': 'Tenant database mismatch'}, status=status.HTTP_403_FORBIDDEN)
+
             job_id_str = str(job.id)
+            sem = getattr(self, '_extraction_semaphore', None)
+            if sem is None:
+                sem = threading.BoundedSemaphore(4)
+                type(self)._extraction_semaphore = sem
 
             def _run_extraction():
                 try:
-                    extract_questions_v3_task(job_id_str, subjects=subjects_list)
+                    activate_tenant_db(tenant_db)
+                    with sem:
+                        extract_questions_v3_task(job_id_str, subjects=subjects_list, tenant_db=tenant_db)
                 except Exception as exc:
                     logger.error(f"Background extraction failed for job {job_id_str}: {exc}", exc_info=True)
                     try:
                         from questions.models import ExtractionJob as _EJ
-                        _j = _EJ.objects.get(id=job_id_str)
+                        _j = _EJ.objects.using(tenant_db).get(id=job_id_str)
                         if _j.status != 'failed':
                             _j.mark_failed(str(exc))
                     except Exception:
                         pass
+                finally:
+                    clear_current_db()
+                    connections.close_all()
 
-            t = threading.Thread(target=_run_extraction, daemon=True, name=f"extraction-{job_id_str[:8]}")
-            t.start()
-            logger.info(f"V3 Upload: Background thread {t.name} started for job {job_id_str}")
+            def _start_thread():
+                t = threading.Thread(target=_run_extraction, daemon=True, name=f"extraction-{job_id_str[:8]}")
+                t.start()
+                logger.info(f"V3 Upload: Background thread {t.name} started for job {job_id_str} on db={tenant_db}")
+
+            transaction.on_commit(_start_thread, using=tenant_db)
 
             return Response({
                 'job_id': job_id_str,
